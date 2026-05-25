@@ -137,7 +137,9 @@ fun WorldMapScreen(
             override fun sizeOf(key: String, value: android.graphics.drawable.Drawable): Int {
                 val bmp = (value as? android.graphics.drawable.BitmapDrawable)?.bitmap
                     ?: (value as? ExactSizeDrawable)?.let { null }
-                return (bmp?.byteCount ?: (value.intrinsicWidth * value.intrinsicHeight * 4)) / 1024
+                val bytes = bmp?.byteCount?.toLong()
+                    ?: (value.intrinsicWidth.coerceAtLeast(1).toLong() * value.intrinsicHeight.coerceAtLeast(1).toLong() * 4L)
+                return (bytes / 1024L).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
             }
         }
     }
