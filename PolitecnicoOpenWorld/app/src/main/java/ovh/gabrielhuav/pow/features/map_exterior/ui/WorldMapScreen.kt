@@ -135,8 +135,7 @@ fun WorldMapScreen(
     val nativeDrawableCache = remember {
         object : android.util.LruCache<String, android.graphics.drawable.Drawable>(20 * 1024) {
             override fun sizeOf(key: String, value: android.graphics.drawable.Drawable): Int {
-                val bytes = estimatedDrawableBytes(value)
-                return (bytes / 1024L).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+                return estimatedDrawableSizeKb(value)
             }
         }
     }
@@ -1544,6 +1543,8 @@ private class ExactSizeDrawable(
     val exactWidthPx: Int,
     val exactHeightPx: Int
 ) : android.graphics.drawable.Drawable() {
+    val targetWidth: Int get() = exactWidthPx
+    val targetHeight: Int get() = exactHeightPx
     override fun getIntrinsicWidth() = exactWidthPx
     override fun getIntrinsicHeight() = exactHeightPx
     override fun draw(canvas: android.graphics.Canvas) {
@@ -1556,52 +1557,56 @@ private class ExactSizeDrawable(
     @Deprecated("Deprecated in Java") override fun getOpacity() = base.opacity
 }
 private fun readExactSizeDimension(drawable: android.graphics.drawable.Drawable, names: List<String>): Int? {
-    for (name in names) {
-        try {
-            val field = drawable.javaClass.getDeclaredField(name).apply { isAccessible = true }
-            return field.get(drawable) as? Int
-        } catch (e: Exception) {
-            try {
-                val method = drawable.javaClass.getDeclaredMethod(name)
-                return method.invoke(drawable) as? Int
-            } catch (e2: Exception) {
-                try {
-                    val getterName = "get" + name.replaceFirstChar { it.uppercase() }
-                    val method = drawable.javaClass.getDeclaredMethod(getterName)
-                    return method.invoke(drawable) as? Int
-                } catch (e3: Exception) {}
+    return names.firstNotNullOfOrNull { name ->
+        runCatching {
+            val method = drawable.javaClass.methods.firstOrNull {
+                it.parameterCount == 0 && it.name.equals(name, ignoreCase = true)
             }
-        }
+            val methodValue = (method?.invoke(drawable) as? Number)?.toInt()
+            if (methodValue != null) {
+                methodValue
+            } else {
+                val field = drawable.javaClass.declaredFields.firstOrNull {
+                    it.name.equals(name, ignoreCase = true)
+                }
+                field?.let {
+                    it.isAccessible = true
+                    (it.get(drawable) as? Number)?.toInt()
+                }
+            }
+        }.getOrNull()?.takeIf { it > 0 }
     }
-    return null
 }
 
 private fun estimatedDrawableBytes(drawable: android.graphics.drawable.Drawable): Long {
-    if (drawable is android.graphics.drawable.BitmapDrawable) {
-        return drawable.bitmap.byteCount.toLong()
+    (drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap?.let { bitmap ->
+        return bitmap.byteCount.toLong()
     }
 
     if (drawable is ExactSizeDrawable) {
-        return drawable.exactWidthPx.toLong() * drawable.exactHeightPx.toLong() * 4L
-    }
-
-    val targetWidth = readExactSizeDimension(drawable, listOf("exactWidthPx", "targetWidth", "exactWidth"))
-    val targetHeight = readExactSizeDimension(drawable, listOf("exactHeightPx", "targetHeight", "exactHeight"))
-    if (targetWidth != null && targetHeight != null) {
-        return targetWidth.toLong() * targetHeight.toLong() * 4L
-    }
-
-    try {
-        val currentMethod = drawable.javaClass.getMethod("getCurrent")
-        val current = currentMethod.invoke(drawable) as? android.graphics.drawable.Drawable
-        if (current != null && current !== drawable) {
-            return estimatedDrawableBytes(current)
+        val targetWidth = readExactSizeDimension(drawable, listOf("getTargetWidth", "targetWidth", "width"))
+        val targetHeight = readExactSizeDimension(drawable, listOf("getTargetHeight", "targetHeight", "height"))
+        if (targetWidth != null && targetHeight != null) {
+            return targetWidth.toLong() * targetHeight.toLong() * 4L
         }
-    } catch (e: Exception) {}
+    }
 
-    val width = drawable.intrinsicWidth.coerceAtLeast(1).toLong()
-    val height = drawable.intrinsicHeight.coerceAtLeast(1).toLong()
-    return width * height * 4L
+    val currentDrawable = drawable.current
+    if (currentDrawable != null && currentDrawable !== drawable) {
+        val currentBytes = estimatedDrawableBytes(currentDrawable)
+        if (currentBytes > 0) {
+            return currentBytes
+        }
+    }
+
+    val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: 1
+    val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: 1
+    return width.toLong() * height.toLong() * 4L
+}
+
+private fun estimatedDrawableSizeKb(drawable: android.graphics.drawable.Drawable): Int {
+    val computedKb = (estimatedDrawableBytes(drawable) + 1023L) / 1024L
+    return computedKb.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
 }
 
 fun getAssetFile(context: Context, assetPath: String, fileName: String): java.io.File {
