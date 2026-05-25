@@ -135,9 +135,8 @@ fun WorldMapScreen(
     val nativeDrawableCache = remember {
         object : android.util.LruCache<String, android.graphics.drawable.Drawable>(20 * 1024) {
             override fun sizeOf(key: String, value: android.graphics.drawable.Drawable): Int {
-                val bmp = (value as? android.graphics.drawable.BitmapDrawable)?.bitmap
-                    ?: (value as? ExactSizeDrawable)?.let { null }
-                return (bmp?.byteCount ?: (value.intrinsicWidth * value.intrinsicHeight * 4)) / 1024
+                val bytes = estimatedDrawableBytes(value)
+                return (bytes / 1024L).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
             }
         }
     }
@@ -1541,9 +1540,9 @@ private class MapJsBridge(private val vm: WorldMapViewModel) {
 }
 
 private class ExactSizeDrawable(
-    private val base: android.graphics.drawable.Drawable,
-    private val exactWidthPx: Int,
-    private val exactHeightPx: Int
+    val base: android.graphics.drawable.Drawable,
+    val exactWidthPx: Int,
+    val exactHeightPx: Int
 ) : android.graphics.drawable.Drawable() {
     override fun getIntrinsicWidth() = exactWidthPx
     override fun getIntrinsicHeight() = exactHeightPx
@@ -1556,6 +1555,55 @@ private class ExactSizeDrawable(
     override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) { base.colorFilter = colorFilter }
     @Deprecated("Deprecated in Java") override fun getOpacity() = base.opacity
 }
+private fun readExactSizeDimension(drawable: android.graphics.drawable.Drawable, names: List<String>): Int? {
+    for (name in names) {
+        try {
+            val field = drawable.javaClass.getDeclaredField(name).apply { isAccessible = true }
+            return field.get(drawable) as? Int
+        } catch (e: Exception) {
+            try {
+                val method = drawable.javaClass.getDeclaredMethod(name)
+                return method.invoke(drawable) as? Int
+            } catch (e2: Exception) {
+                try {
+                    val getterName = "get" + name.replaceFirstChar { it.uppercase() }
+                    val method = drawable.javaClass.getDeclaredMethod(getterName)
+                    return method.invoke(drawable) as? Int
+                } catch (e3: Exception) {}
+            }
+        }
+    }
+    return null
+}
+
+private fun estimatedDrawableBytes(drawable: android.graphics.drawable.Drawable): Long {
+    if (drawable is android.graphics.drawable.BitmapDrawable) {
+        return drawable.bitmap.byteCount.toLong()
+    }
+
+    if (drawable is ExactSizeDrawable) {
+        return drawable.exactWidthPx.toLong() * drawable.exactHeightPx.toLong() * 4L
+    }
+
+    val targetWidth = readExactSizeDimension(drawable, listOf("exactWidthPx", "targetWidth", "exactWidth"))
+    val targetHeight = readExactSizeDimension(drawable, listOf("exactHeightPx", "targetHeight", "exactHeight"))
+    if (targetWidth != null && targetHeight != null) {
+        return targetWidth.toLong() * targetHeight.toLong() * 4L
+    }
+
+    try {
+        val currentMethod = drawable.javaClass.getMethod("getCurrent")
+        val current = currentMethod.invoke(drawable) as? android.graphics.drawable.Drawable
+        if (current != null && current !== drawable) {
+            return estimatedDrawableBytes(current)
+        }
+    } catch (e: Exception) {}
+
+    val width = drawable.intrinsicWidth.coerceAtLeast(1).toLong()
+    val height = drawable.intrinsicHeight.coerceAtLeast(1).toLong()
+    return width * height * 4L
+}
+
 fun getAssetFile(context: Context, assetPath: String, fileName: String): java.io.File {
     val file = java.io.File(context.cacheDir, fileName)
     if (!file.exists()) {
