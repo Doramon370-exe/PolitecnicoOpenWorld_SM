@@ -13,6 +13,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_CONTROLS_SCALE = "CONTROLS_SCALE"
         private const val KEY_SWAP_CONTROLS = "SWAP_CONTROLS"
         private const val KEY_PLAYER_SKIN = "PLAYER_SKIN"
+
         private const val KEY_SHOW_ROAD_NETWORK = "SHOW_ROAD_NETWORK"
         private const val SCALE_MIN = 0.6f
         private const val SCALE_MAX = 1.4f
@@ -66,4 +67,5 @@ class SettingsRepository(context: Context) {
     }
 
     fun getShowRoadNetwork(): Boolean = prefs.getBoolean(KEY_SHOW_ROAD_NETWORK, true)
+}
 }

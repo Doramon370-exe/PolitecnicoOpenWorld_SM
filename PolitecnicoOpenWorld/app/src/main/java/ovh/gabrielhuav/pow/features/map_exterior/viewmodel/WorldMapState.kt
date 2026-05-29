@@ -102,3 +102,4 @@ data class WorldMapState(
     val showInteriorDebugOverlay: Boolean = false,
     val showRoadNetwork: Boolean = true
 )
+)
