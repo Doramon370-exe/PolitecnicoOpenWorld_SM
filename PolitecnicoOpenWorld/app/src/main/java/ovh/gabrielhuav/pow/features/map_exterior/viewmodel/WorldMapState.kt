@@ -47,6 +47,14 @@ data class PoliceShot(
 enum class RoadSource { LOADING, LOCAL_DB, NETWORK }
 enum class TileSource  { LOCAL_OSM, LOCAL_CACHE, NETWORK }
 
+// Herramienta activa del EDITOR del Debug Interiores. Define qué geometría se dibuja
+// al capturar puntos caminando con el jugador:
+//   WALL    = barda (línea ROJA, bloquea el paso)
+//   BLOCK   = zona NO caminable (polígono ROJO translúcido, p. ej. un edificio)
+//   NAV_PED = camino peatonal (línea VERDE, por donde caminan los NPCs)
+//   NAV_CAR = camino de autos / estacionamiento (línea NARANJA)
+enum class DebugEditTool { NONE, WALL, BLOCK, NAV_PED, NAV_CAR }
+
 data class WorldMapState(
     val currentLocation: GeoPoint? = null,
     val isLoadingLocation: Boolean = true,
@@ -133,6 +141,9 @@ data class WorldMapState(
     val isTargetingWaypoint: Boolean = false,
     val routeWaypoints: List<GeoPoint> = emptyList(),
     val showDestinationRoute: Boolean = true,
+    // MODO HISTORIA: línea GPS ROJA de la misión "Lleva a Prankedy a un lugar seguro"
+    // (ruta A* ENCB→ESCOM sobre la red vial). Vacía = sin línea (free roam o ya llegó).
+    val campaignRouteWaypoints: List<GeoPoint> = emptyList(),
     val destinationArrivalThreshold: Double = 20.0,
     val showZombiVideo: Boolean = false,
     val isZombieHandSpawned: Boolean = false,
@@ -154,6 +165,23 @@ data class WorldMapState(
     val routeDebugWaypoints: List<GeoPoint> = emptyList(), // Las "migas de pan"
     val isParkingSlotMode: Boolean = false,                // Flag del Checkbox
     val currentWayId: Int = 100,                           // ID del carril actual
+
+    // ─── EDITOR DEL DEBUG INTERIORES ─────────────────────────────────────────
+    // Permite EDITAR las líneas del overlay DIBUJANDO con el dedo en el mapa (estilo Paint):
+    // arrastras para una línea (WALL/NAV_*) o un rectángulo (BLOCK) y se "commitea" a la lista
+    // del color/tipo. Se dibujan en vivo (NativeOsmMap) y se exportan/importan a JSON
+    // (formato exterior_collisions + navPaths).
+    val debugEditTool: DebugEditTool = DebugEditTool.NONE,
+    val debugEditWalls: List<ovh.gabrielhuav.pow.domain.models.CollisionWall> = emptyList(),     // bardas ROJAS editadas
+    val debugEditBlocks: List<ovh.gabrielhuav.pow.domain.models.CollisionPolygon> = emptyList(), // zonas ROJAS editadas
+    val debugEditNavPed: List<List<GeoPoint>> = emptyList(),                               // caminos VERDES (peatonal)
+    val debugEditNavCar: List<List<GeoPoint>> = emptyList(),                               // caminos NARANJAS (autos)
+
+    // ─── MODO HISTORIA: objetivo de campaña + widget de Objetivos ────────────
+    // Objetivo activo (Misión 1 = ir a la ENCB). El widget de Objetivos lo muestra
+    // (título + distancia) siempre que haya uno. `objectiveDone` se marca al llegar.
+    val currentObjective: ovh.gabrielhuav.pow.domain.models.CampaignObjective? = null,
+    val objectiveDone: Boolean = false,
 
     // Easter Eggs y Opciones extra
     val showRoadNetwork: Boolean = true,
@@ -182,6 +210,13 @@ data class WorldMapState(
     val nearbyMetroStation: ovh.gabrielhuav.pow.domain.models.MetroStation? = null,
     val showMetroFade: Boolean = false,
     val metroFadeCompleteStation: ovh.gabrielhuav.pow.domain.models.MetroStation? = null,
+
+    
+    // ─── Metrobús Stations ────────────────────────────────────────────────────
+    val metrobusStations: List<ovh.gabrielhuav.pow.domain.models.MetrobusStation> = emptyList(),
+    val nearbyMetrobusStation: ovh.gabrielhuav.pow.domain.models.MetrobusStation? = null,
+    val showMetrobusFade: Boolean = false,
+    val metrobusFadeCompleteStation: ovh.gabrielhuav.pow.domain.models.MetrobusStation? = null,
 
     // ─── Pre-descarga de tiles de la zona actual (offline) ───────────────────
     // Solo aplica al proveedor nativo OSM (caché Room unificada). Permite seguir

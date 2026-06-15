@@ -143,6 +143,13 @@ import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.commitMapProvider
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.deleteSelectedLandmark
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.exportLandmarksToUri
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.importLandmarksFromUri
+// Editor del Debug Interiores: seleccionar herramienta / deshacer / limpiar / exportar (extensiones del VM).
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.undoLastDebugShape
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.commitDebugStroke
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.clearDebugEdits
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setDebugEditTool
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.exportDebugEditsToUri
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.importDebugEditsFromUri
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.loadLandmarks
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.moveSelectedLandmark
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.prepareMapForEntry
@@ -215,7 +222,8 @@ fun WorldMapScreen(
     viewModel: WorldMapViewModel = viewModel(factory = WorldMapViewModel.Factory(context)),
     onNavigateToMainMenu: () -> Unit = {},
     onNavigateToSettings: () -> Unit,
-    onNavigateToInterior: (String) -> Unit = {}
+    onNavigateToInterior: (String) -> Unit = {},
+    onRequestSaveGame: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val roadNetwork by viewModel.roadNetworkFlow.collectAsState()
@@ -254,6 +262,13 @@ fun WorldMapScreen(
     }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { viewModel.importLandmarksFromUri(context, it) }
+    }
+    // Editor del Debug Interiores: exportar/importar la geometría editada (colisiones + caminos).
+    val collisionsExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let { viewModel.exportDebugEditsToUri(context, it) }
+    }
+    val collisionsImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.importDebugEditsFromUri(context, it) }
     }
 
     val landmarkBitmapCache = remember { mutableMapOf<String, android.graphics.Bitmap?>() }
@@ -1317,6 +1332,13 @@ fun WorldMapScreen(
                             }
                         } else wv.evaluateJavascript("if(typeof updateDestinationRoute==='function')updateDestinationRoute(0, 0, [], false);", null)
 
+                        // MODO HISTORIA: línea GPS roja de campaña (ENCB → ESCOM). Se dibuja/limpia
+                        // según el estado; al llegar a ESCOM el VM la vacía y aquí se borra sola.
+                        if (uiState.campaignRouteWaypoints.isNotEmpty()) {
+                            val campJson = uiState.campaignRouteWaypoints.map { mapOf("lat" to it.latitude, "lng" to it.longitude) }.let { gson.toJson(it) }
+                            wv.evaluateJavascript("if(typeof updateCampaignRoute==='function')updateCampaignRoute($campJson);", null)
+                        } else wv.evaluateJavascript("if(typeof updateCampaignRoute==='function')updateCampaignRoute([]);", null)
+
                         // Waypoints de patrullas FUERA de la neblina (paridad con OSM nativo):
                         // 🚓 + línea punteada jugador→patrulla mientras te buscan. Las patrullas
                         // DENTRO de la neblina ya se dibujan como sprite (no llevan waypoint).
@@ -1439,6 +1461,23 @@ fun WorldMapScreen(
                     }
                 )
             }
+        }
+
+        // ───── CAPA DE DIBUJO DEL EDITOR (Debug Interiores) ─────────────────────
+        // Va SOBRE el mapa (cualquier renderer: web/OSM/Google) y DEBAJO de los botones y
+        // el panel (que se dibujan después). Con herramienta activa intercepta el toque:
+        // el mapa NO se mueve y dibujas líneas/rectángulos. Con NONE deja pasar el gesto.
+        if (uiState.showInteriorDebugOverlay) {
+            ovh.gabrielhuav.pow.features.map_exterior.ui.components.InteriorDebugDrawSurface(
+                tool = uiState.debugEditTool,
+                walls = uiState.debugEditWalls,
+                blocks = uiState.debugEditBlocks,
+                navPed = uiState.debugEditNavPed,
+                navCar = uiState.debugEditNavCar,
+                center = uiState.currentLocation,
+                zoom = uiState.zoomLevel,
+                onCommit = { t, pts -> viewModel.commitDebugStroke(t, pts) }
+            )
         }
 
         // ─── CAPA DE NEBLINA (fog of war estilo Age of Empires) — SIEMPRE ACTIVA ──
@@ -1759,6 +1798,10 @@ fun WorldMapScreen(
                             id = "opciones", label = androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.wm_fab_options), icon = Icons.Default.Tune,
                             items = buildList {
                                 add(OptionMenuItem(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.wm_opt_change_skin), Icons.Default.Person, Color(0xFFD91B5B)) { viewModel.toggleSkinSelector(true) })
+                                // MODO HISTORIA: guardado manual → abre el selector de slots.
+                                add(OptionMenuItem("Guardar partida", Icons.Default.School, Color(0xFF4CAF50)) {
+                                    onRequestSaveGame()
+                                })
                                 add(OptionMenuItem(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.wm_opt_teleport), Icons.Default.LocationOn, Color(0xFFFF9800)) { viewModel.toggleTeleportMenu(true) })
                                 // (Submenú "Ir a…" eliminado: "Ir a ESCOM" ya es el primer punto de
                                 // "Teletransportarse…" y "Ir a tu Ubicación (GPS)" se movió al inicio
@@ -2006,6 +2049,42 @@ fun WorldMapScreen(
             )
         }
 
+        // ─── PANEL DEL EDITOR DE LÍNEAS (Debug Interiores) ───────────────────────
+        // Visible cuando el overlay de Debug Interiores está activo. Barra horizontal
+        // abajo (los controles de movimiento se ocultan al editar). Se DIBUJA con el dedo
+        // sobre el mapa: arrastre = línea (bardas/caminos) o rectángulo (zonas rojas).
+        if (uiState.showInteriorDebugOverlay) {
+            ovh.gabrielhuav.pow.features.map_exterior.ui.components.InteriorDebugEditorPanel(
+                tool = uiState.debugEditTool,
+                wallsCount = uiState.debugEditWalls.size,
+                blocksCount = uiState.debugEditBlocks.size,
+                navPedCount = uiState.debugEditNavPed.size,
+                navCarCount = uiState.debugEditNavCar.size,
+                onSelectTool = { viewModel.setDebugEditTool(it) },
+                onUndo = { viewModel.undoLastDebugShape() },
+                onClear = { viewModel.clearDebugEdits() },
+                onExport = { collisionsExportLauncher.launch("exterior_collisions_editado.json") },
+                onImport = { collisionsImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            )
+        }
+
+        // ─── WIDGET DE OBJETIVOS (Modo Historia) — siempre visible si hay objetivo ──
+        uiState.currentObjective?.let { obj ->
+            ovh.gabrielhuav.pow.features.map_exterior.ui.components.ObjectivesWidget(
+                objective = obj,
+                done = uiState.objectiveDone,
+                playerLocation = uiState.currentLocation,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .systemBarsPadding()
+                    .padding(start = 12.dp, top = 12.dp)
+            )
+        }
+
         val configuration = LocalConfiguration.current
         val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
         val maxScale = if (isPortrait) 1.0f else 1.4f
@@ -2034,7 +2113,7 @@ fun WorldMapScreen(
             }
         }
 
-        if (!uiState.isDesignerMode) { // Oculta joystick y botones en modo diseñador
+        if (!uiState.isDesignerMode && !uiState.showInteriorDebugOverlay) { // Oculta joystick y botones en modo diseñador y al editar el Debug Interiores
             Row(modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).padding(bottom = bottomPadding, start = sidePadding, end = sidePadding), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 if (uiState.isDriving) {
                 // D-pad de conducción: SOLO gira (IZQ/DER). Arriba/abajo quedan inertes
@@ -2195,6 +2274,32 @@ fun WorldMapScreen(
         if (station != null) {
             viewModel.consumeMetroFadeComplete()
             onNavigateToInterior("metro_station_interior/${station.name}")
+        }
+    }
+
+    // ─── Metrobús Fade Overlay ───────────────────────────────────────────────
+    val metrobusFadeAlpha = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(uiState.showMetrobusFade) {
+        if (uiState.showMetrobusFade) {
+            metrobusFadeAlpha.animateTo(1f, animationSpec = androidx.compose.animation.core.tween(600))
+            viewModel.onMetrobusFadeComplete()
+            kotlinx.coroutines.delay(200)
+            metrobusFadeAlpha.animateTo(0f, animationSpec = androidx.compose.animation.core.tween(400))
+        }
+    }
+    if (metrobusFadeAlpha.value > 0f) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFFC21D24).copy(alpha = metrobusFadeAlpha.value))
+        )
+    }
+
+    LaunchedEffect(uiState.metrobusFadeCompleteStation) {
+        val station = uiState.metrobusFadeCompleteStation
+        if (station != null) {
+            viewModel.consumeMetrobusFadeComplete()
+            onNavigateToInterior("metrobus_station_interior/${station.name}")
         }
     }
 }

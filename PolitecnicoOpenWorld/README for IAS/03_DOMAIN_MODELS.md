@@ -141,7 +141,7 @@ userPopulationFactor`:
   4. **Rebase del jugador (anti-órbita):** al esquivar al jugador el coche persigue un carrot local, así que
      ahora avanza `targetNodeIndex` en cuanto REBASA el nodo base (`avoidingPlayer` + producto punto en el
      return de `moveNpc`); sin esto se daba la vuelta y orbitaba sin rebasar (ver 09).
-- **Topes base de población:** `maxActiveNpcs`/`maxTotalNpcs` no-zombi = **18/38** (antes 26/55), siguen
+- **Topes base de población:** `maxActiveNpcs`/`maxTotalNpcs` no-zombi = **10/22** (antes 18/38; densidad más realista al caminar; `SPAWN_SCAN_MS`=900 y máx 2 spawns/escaneo), siguen
   escalando por `popFactor` (ver 09).
 - `triggerFear(lat, lon)` — marca evento de miedo; los COWARD cercanos huyen (`applyPendingFear`).
 - `rollTrait()` — PASSIVE/COWARD/AGGRESSIVE según `aggressiveRatio`.
@@ -276,8 +276,17 @@ chases the player and throws a gas tank, but **sides with you** to attack any NP
 VM-driven per tick, client-local. Not hireable.
 
 **Fases / phases** (`PrankedyState.kt`): `PrankedyPhase` = `NOT_HIRED` (= activo/hostil, estado vivo),
-`DEAD` (timer de respawn); `HIRED` quedó **sin uso** (legado). `PrankedyAnimState` = `IDLE, WALK, RUN,
-RUN_TANQUE, ATTACK`.
+`DEAD` (timer de respawn); **🆕 `HIRED` = modo ACOMPAÑANTE del Modo Historia** (campaña ENCB): te sigue de
+forma pacífica (sin atacarte ni lanzar el tanque). Se entra con **`spawnCompanion(nearPlayer, roadNetwork, now)`**
+(= `spawn` + `phase=HIRED`); en `tick(...,playerRunning)`, si `phase==HIRED` corre **`tickFollow`** en vez
+de `tickCombat`. **Seguimiento optimizado:** se detiene MUY cerca (`FOLLOW_STOP_DIST`≈3 m, para no rezagarse),
+**iguala la velocidad del jugador** (corre `p_run`/`RUN_SPEED` si `playerRunning` **o** si está lejos
+—`FOLLOW_WALK_DIST`≈12 m—, si no camina `p_walk`); **ROAD-ONLY ESTRICTO** (snap a la red vial SIEMPRE, sin
+atajos por césped/edificios); la **orientación** se calcula con el **vector de movimiento real**
+(`atan2(dLat,dLon)` → voltea el sprite hacia donde avanza, ya no parece caminar al revés).
+`PrankedyAnimState` = `IDLE, WALK, RUN,
+RUN_TANQUE, ATTACK`. La activación (solo `inCampaign` && vecindario ENCB) la hace
+`WorldMapPrankedy.maybeSpawnPrankedyCompanion` (ver 04/07).
 
 **Constantes clave / key constants:**
 ```

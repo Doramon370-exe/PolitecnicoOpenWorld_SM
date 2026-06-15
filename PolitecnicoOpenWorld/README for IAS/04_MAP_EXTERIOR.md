@@ -23,6 +23,8 @@ extension partials** (`WorldMap*.kt`) grouping logic by topic. State is `WorldMa
 | Proveedores de mapa + descarga/compuertas de tiles | `viewmodel/WorldMapProviders.kt` (NUEVO, refactor) |
 | Modo Diseñador / landmarks (Room, edición, import/export) | `viewmodel/WorldMapDesigner.kt` (NUEVO, refactor) |
 | Nivel de búsqueda + policía propia + carjack | `viewmodel/WorldMapWanted.kt` (NUEVO, refactor) |
+| 🆕 Guardado/carga de partida (Modo Historia, JSON) | `viewmodel/WorldMapSaveGame.kt` + `data/repository/SaveGameRepository.kt` |
+| 🆕 Editor del Debug Interiores (líneas rojas/verdes/naranjas) | `viewmodel/WorldMapDebugEditor.kt` + `ui/components/InteriorDebugEditorPanel.kt` |
 | Estado UI / UI state | `viewmodel/WorldMapState.kt` |
 | Game loop (parcial) | `viewmodel/WorldMapGameLoop.kt` |
 | Multiplayer relay/parse | `viewmodel/WorldMapMultiplayer.kt` (+ `WorldMapMultiplayerModels.kt`) |
@@ -134,6 +136,21 @@ espacial en grid** (`Seg` = segmento + `HashMap<celda, List<Seg>>`), corriendo *
 O(candidatos cercanos).
 **EN:** The player **can't leave roads**. Every move is validated against a **spatial grid index**
 (`Seg` + `HashMap<cell, List<Seg>>`), running snap-to-road in O(nearby candidates).
+
+> **🆕 ZONAS LIBRES (campus): ESCOM y ENCB.** Dentro del bounding box de ESCOM (`ESCOM_BASE_LAT/LON` ±
+> `ESCOM_OFFSET`) o de la **ENCB** (`ENCB_BASE_LAT=19.5001588`, `ENCB_BASE_LON=-99.1450298`, `ENCB_OFFSET=0.0012`,
+> ~130 m) se **suspende el snap-to-road**: `moveCharacter`/`moveCharacterByAngle` consultan
+> `isFreeMovementZone(lat,lon)` (= `isInsideEscom || isInsideEncb`, miembros `internal`) y mueven al jugador a la
+> coordenada `(x,y)` libre (tras la aduana de choque de bardas). **Prankedy** hace lo mismo: `runPrankedyTick`
+> calcula `freeZone` desde la posición del jugador y, si está en campus, **apaga el snap** (`snapToRoad` devuelve
+> el punto sin tocar) → persigue en **línea recta (steer-to-target)** a `p_run`. El estado es **per-tick**: al
+> salir del perímetro vuelve el snap normal (salvo que entre al box de ESCOM, también libre). Ver 03 (Prankedy) y 07.
+>
+> **🆕 Regla visual simétrica (ESCOM y ENCB):** `updateVisibleRoads(location, force)` comprueba al inicio
+> `isFreeMovementZone(location)`; si es true **vacía `_roadNetworkFlow` (emptyList) y hace `return`** (salta el
+> filtro en `Dispatchers.Default`), de modo que **dentro de cualquiera de los dos campus NO se pintan las líneas
+> de calles** (las amarillas de Overpass). Al salir del box recupera el filtrado normal. Misma condición que el
+> movimiento libre, así ambas zonas quedan limpias.
 
 - `ensureIndex()` / `candidates(loc): List<Seg>` / `getNearestPointOnNetwork(t): GeoPoint` /
   `project(p, v, w): GeoPoint` (proyección punto-segmento).
@@ -270,6 +287,11 @@ balanceo + parámetros volátiles) hasheada con SHA-256. Permite juego offline e
   peatón, **sin** indicador flotante, proyectil interpolado encima de la niebla) **y web** (`updatePrankedy`/
   `updatePrankedyProjectile` en `WorldMapLeafletHtml`, base64 por frame empujado desde `WorldMapScreen`).
   Google nativo = pendiente. IA/comportamiento → ver 03.
+- **🆕 Línea GPS de campaña (Modo Historia):** ruta A* `findRoadRoute(ENCB, ESCOM)` (en `WorldMapRouting.kt`,
+  sobre la red vial) → `WorldMapState.campaignRouteWaypoints`, dibujada como **`Polyline` ROJA** en OSM nativo
+  (`NativeOsmMap`, tag `route_overlay_tag+900`, `overlays.add(0,…)` → sobre teselas, bajo personajes/HUD) y en
+  web (JS `updateCampaignRoute` en `WorldMapLeafletHtml`). La activa `maybeSpawnPrankedyCompanion` y la oculta
+  `maybeHideCampaignRouteNearEscom` (~100 m de ESCOM) en `WorldMapPrankedy.kt`. Google nativo = pendiente. Ver 07.
 - **LOD de emojis (gama baja):** si `uiState.npcEmojiLod` (Ajustes→Jugabilidad), `NativeOsmMap` dibuja los
   NPCs a **>40 m** del jugador como un **emoji barato** (🧍/🚗/🧟/👮 cacheado por tipo+tamaño) en vez del
   sprite/bitmap completo; solo los muy cercanos llevan el asset. Recorta el costo de render. **Solo OSM
@@ -287,6 +309,8 @@ in multiplayer. Zombie models + AI → see **03**.
 - **Estado:** `WorldMapState.globalZombieMode: Boolean`. El game loop hace `npcAiManager.globalZombieMode = uiState.globalZombieMode` cada tick.
 - **Activación:** (a) **ítem de menú "Activar/Desactivar Apocalipsis"** (Opciones) que funciona en cualquier lugar; (b) **botón flotante de salida** cuando está activo (`exitGlobalZombieMode()`). *(La antigua mano "Mano del Apocalipsis" en ESCOM fue ELIMINADA — `spawnEscomItems` ya no la crea; ver 09.)*
 - **Debug Interiores (`showInteriorDebugOverlay`, menú Mapa):** además de los puntos de edificios + bbox de ESCOM, dibuja los **caminos del `navGraph`** (VERDE=peatonal, NARANJA=autos) y las **zonas NO caminables** de `exterior_collisions.json` (**polígonos ROJOS** = `exteriorCollisions.polygons`, p. ej. el edificio ESCOM; **líneas ROJAS** = `walls`/bardas). `exteriorCollisions` se expone en `WorldMapState`. OSM nativo (`NativeOsmMap`) + web (`updateInteriorPaths` recibe `{paths, blocks, walls}`); Google nativo pendiente. Ver 09.
+- **🆕 EDITOR del Debug Interiores (`WorldMapDebugEditor.kt` + `InteriorDebugEditorPanel.kt`):** con el overlay activo aparece una **barra horizontal abajo** (los controles de movimiento se **ocultan** al editar) para **EDITAR** las líneas **DIBUJANDO con el dedo** (estilo Paint): eliges herramienta `DebugEditTool` (WALL=barda roja, BLOCK=zona roja, NAV_PED=verde peatonal, NAV_CAR=naranja autos) y **arrastras** sobre el mapa → línea (WALL/NAV_*) o rectángulo (BLOCK); con herramienta activa el mapa NO panea (touch consumido), con `NONE` vuelve a panear. **Deshacer** (último trazo) / **Limpiar** / **Exportar/Importar JSON** (formato `exterior_collisions.json` + sección `navPaths`). El dibujo es una **capa Compose sobre el mapa** (`InteriorDebugDrawSurface`, en `WorldMapScreen`) que funciona con **cualquier renderer** (web/OSM/Google) — clave porque el proveedor por defecto es WEB (Leaflet): captura el gesto desde el `ACTION_DOWN` (`awaitEachGesture`+`consume()`) para que el mapa NO panee, convierte pantalla↔geo con Web Mercator (`256·densidad·2^zoom`, centro = jugador) y commitea con `commitDebugStroke`. En modo debug el mapa **se mantiene centrado en el jugador** (la capa asume ese centro). Estado nuevo en `WorldMapState`: `debugEditTool`, `debugEditWalls`, `debugEditBlocks`, `debugEditNavPed`, `debugEditNavCar`.
+- **🆕 Guardado de partida (Modo Historia):** API del VM en `WorldMapSaveGame.kt` (`saveGame`/`loadGame`/`buildSaveData`/`restoreSaveData`) + `SaveGameRepository` (JSON). Campos del VM `campaignSchoolId`/`inCampaign`. Ver 07/09. **Fix de `setStorySpawn`:** ahora se comporta como un teletransporte (`gateMapDownloadAfterTeleport()` + reset de `lastNetworkFetchLocation`/`lastFetchAttemptMs`/`npcWarmupCycles`) para que "COMENZAR/CARGAR" SÍ carguen y suelten al jugador (antes `prepareMapForEntry`, idempotente por `mapPrepStarted`, dejaba la 2ª entrada cargando para siempre). Ver 09.
 - **VM API:** `toggleGlobalZombieMode()` (flip + broadcast `ZOMBIE_MODE_SET`), `exitGlobalZombieMode()`.
 - **Daño al jugador (¡crítico!):** los zombis muerden vía `applyNpcContactDamage(location)` y el atropello vía `runOverNpcs(finalLoc, speed)`. **Estas dos llamadas viven en el game loop MIEMBRO de `WorldMapViewModel.kt`** (el activo). La extensión `WorldMapGameLoop.kt` también las tiene pero está **sombreada/muerta** — editar solo el miembro (ver 09).
 - **Multijugador:** el Host simula los zombis y los replica por `NPC_BATCH_UPDATE` (conserva `npcType=ZOMBIE` + health/isDying). El toggle viaja en `ZOMBIE_MODE_SET` (global) — relayado por `Multiplayer/server.js` (NO por `MultiplayerInteriores/`). `addRemoteEntity` reconstruye el zombi remoto con `visualConfig=null` y `speed=PERSON_SPEED` (animan). Ver **08**.

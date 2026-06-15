@@ -142,6 +142,9 @@ internal fun NativeOsmMap(
     nativeMapRef: MutableState<MapView?>,
 ) {
     var hasTriggeredNativePan by remember { mutableStateOf(false) }
+    // NOTA: el DIBUJO del editor del Debug Interiores se hace en una capa Compose POR ENCIMA
+    // del mapa (InteriorDebugDrawSurface en WorldMapScreen), válida para cualquier renderer
+    // (web/OSM/Google). Aquí ya no se intercepta el touch para dibujar.
 
     // OPT gama baja: holder NO observable de la última lista de NPCs renderizada. El
     // `update` corre en CADA recomposición (~30 Hz por el jugador) pero los NPCs cambian
@@ -275,7 +278,10 @@ internal fun NativeOsmMap(
                 view.isClickable = false
             }
 
-            if (!uiState.isUserPanningMap) {
+            // En el editor del Debug Interiores SE MANTIENE centrado en el jugador (aunque el
+            // usuario intente panear): la capa de dibujo Compose asume centro = jugador para
+            // convertir pantalla↔coordenadas, así que el centro debe ser estable.
+            if (!uiState.isUserPanningMap || uiState.showInteriorDebugOverlay) {
                 uiState.currentLocation?.let { view.controller.setCenter(it) }
             }
 
@@ -563,6 +569,23 @@ internal fun NativeOsmMap(
                 routeOverlay.isEnabled = true
             } else {
                 routeOverlay.isEnabled = false
+            }
+
+            // ─── LÍNEA GPS DE CAMPAÑA (roja, Modo Historia: ENCB → ESCOM) ───
+            // Polyline propia (tag +900) añadida al fondo de overlays (índice 0): se dibuja
+            // sobre las teselas pero por DEBAJO de marcadores/sprites de personajes y del HUD.
+            val campaignRouteOverlay = (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 900 }) as? Polyline)
+                ?: Polyline().apply {
+                    outlinePaint.color = android.graphics.Color.RED
+                    outlinePaint.strokeWidth = 9f
+                    view.setTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 900 }, this)
+                    view.overlays.add(0, this)
+                }
+            if (uiState.campaignRouteWaypoints.isNotEmpty()) {
+                campaignRouteOverlay.setPoints(uiState.campaignRouteWaypoints)
+                campaignRouteOverlay.isEnabled = true
+            } else {
+                campaignRouteOverlay.isEnabled = false
             }
 
             val zoomDiff = abs(view.zoomLevelDouble - uiState.zoomLevel)
@@ -1159,6 +1182,55 @@ internal fun NativeOsmMap(
                 metroMarkerCache.values.forEach { it.isEnabled = false; it.setAlpha(0f) }
             }
 
+            // ─── METROBÚS STATIONS OVERLAY ────────────────────────────────────────────────
+            @Suppress("UNCHECKED_CAST")
+            val metrobusMarkerCache = (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 500 }) as? MutableMap<String, Marker>)
+                ?: mutableMapOf<String, Marker>().also {
+                    view.setTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 500 }, it)
+                }
+
+            if (uiState.zoomLevel >= 14.0) {
+                val metrobusBox = try { view.boundingBox } catch (_: Exception) { null }
+                val mbLatM = if (metrobusBox != null) (metrobusBox.latNorth - metrobusBox.latSouth) * 0.4 else 0.0
+                val mbLonM = if (metrobusBox != null) (metrobusBox.lonEast - metrobusBox.lonWest) * 0.4 else 0.0
+                uiState.metrobusStations.forEach { station ->
+                    val marker = metrobusMarkerCache[station.name] ?: Marker(view).apply {
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        val screenDensity = context.resources.displayMetrics.density
+                        val exactPixels = (24 * screenDensity).toInt()
+                        val cacheKey = "OSM_METROBUS_ICON"
+                        val cachedIcon = nativeDrawableCache.getOrPut(cacheKey) {
+                            try {
+                                val bitmap = android.graphics.BitmapFactory.decodeStream(context.assets.open("metrobusCDMX/icon.png"))
+                                if (bitmap != null) {
+                                    val spriteDrawable = android.graphics.drawable.BitmapDrawable(context.resources, bitmap)
+                                    ExactSizeDrawable(spriteDrawable, exactPixels, exactPixels)
+                                } else ContextCompat.getDrawable(context, android.R.color.transparent)!!
+                            } catch (e: Exception) {
+                                ContextCompat.getDrawable(context, android.R.color.transparent)!!
+                            }
+                        }
+                        icon = cachedIcon
+                        title = station.name
+                        snippet = station.routes.joinToString(", ")
+                        isFlat = true
+                        metrobusMarkerCache[station.name] = this
+                        view.overlays.add(this)
+                    }
+                    marker.position = station.location
+                    val inView = metrobusBox == null || (
+                        station.location.latitude <= metrobusBox.latNorth + mbLatM &&
+                        station.location.latitude >= metrobusBox.latSouth - mbLatM &&
+                        station.location.longitude <= metrobusBox.lonEast + mbLonM &&
+                        station.location.longitude >= metrobusBox.lonWest - mbLonM)
+                    marker.isEnabled = inView
+                    marker.setAlpha(if (inView) 1f else 0f)
+                }
+            } else {
+                metrobusMarkerCache.values.forEach { it.isEnabled = false; it.setAlpha(0f) }
+            }
+
+
             // ─── OVERLAY CREADOR DE RUTAS (MIGAS DE PAN Y CARRILES) ────────────────────────
             // Dibujamos la ruta si estamos en modo diseñador y hay puntos guardados
             if (uiState.isDesignerMode && uiState.routeDebugWaypoints.isNotEmpty()) {
@@ -1200,6 +1272,83 @@ internal fun NativeOsmMap(
             } else {
                 // Fuera de modo disenador / sin puntos: ocultar la linea de depuracion.
                 (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 300 }) as? Polyline)?.isEnabled = false
+            }
+
+            // ─── EDITOR DEL DEBUG INTERIORES (geometría editada + forma en curso) ──────
+            // Dibuja la geometría que el usuario está EDITANDO sobre el overlay de debug:
+            // bardas/zonas ROJAS, caminos VERDES (peatonal) y NARANJAS (autos) ya commiteados,
+            // más la forma EN CURSO (línea blanca punteada). Aislado del overlay de archivo
+            // (interiorPathCache): se reconstruye solo si cambia alguna lista editada.
+            @Suppress("UNCHECKED_CAST")
+            val editOverlayCache = (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 700 }) as? MutableList<org.osmdroid.views.overlay.Overlay>)
+                ?: mutableListOf<org.osmdroid.views.overlay.Overlay>().also { view.setTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 700 }, it) }
+            @Suppress("UNCHECKED_CAST")
+            val editSig = (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 710 }) as? Array<Any?>)
+                ?: arrayOfNulls<Any?>(4).also { view.setTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 710 }, it) }
+
+            if (uiState.showInteriorDebugOverlay) {
+                if (editSig[0] !== uiState.debugEditWalls || editSig[1] !== uiState.debugEditBlocks ||
+                    editSig[2] !== uiState.debugEditNavPed || editSig[3] !== uiState.debugEditNavCar) {
+                    editSig[0] = uiState.debugEditWalls
+                    editSig[1] = uiState.debugEditBlocks
+                    editSig[2] = uiState.debugEditNavPed
+                    editSig[3] = uiState.debugEditNavCar
+                    editOverlayCache.forEach { view.overlays.remove(it) }
+                    editOverlayCache.clear()
+                    // Zonas ROJAS editadas (polígonos translúcidos).
+                    uiState.debugEditBlocks.forEach { poly ->
+                        if (poly.nodes.size < 3) return@forEach
+                        val polygon = org.osmdroid.views.overlay.Polygon().apply {
+                            points = poly.nodes.map { GeoPoint(it.lat, it.lon) }
+                            fillPaint.color = android.graphics.Color.argb(90, 220, 40, 40)
+                            outlinePaint.color = android.graphics.Color.argb(230, 200, 0, 0)
+                            outlinePaint.strokeWidth = 4f
+                            outlinePaint.isAntiAlias = true
+                        }
+                        editOverlayCache.add(polygon); view.overlays.add(polygon)
+                    }
+                    // Bardas ROJAS editadas.
+                    uiState.debugEditWalls.forEach { wall ->
+                        val line = Polyline().apply {
+                            outlinePaint.color = android.graphics.Color.argb(230, 220, 0, 0)
+                            outlinePaint.strokeWidth = 7f
+                            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+                            outlinePaint.isAntiAlias = true
+                            setPoints(listOf(GeoPoint(wall.lat1, wall.lon1), GeoPoint(wall.lat2, wall.lon2)))
+                        }
+                        editOverlayCache.add(line); view.overlays.add(line)
+                    }
+                    // Caminos VERDES (peatonal) editados.
+                    uiState.debugEditNavPed.forEach { path ->
+                        if (path.size < 2) return@forEach
+                        val line = Polyline().apply {
+                            outlinePaint.color = android.graphics.Color.argb(230, 76, 200, 80)
+                            outlinePaint.strokeWidth = 5f
+                            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+                            outlinePaint.isAntiAlias = true
+                            setPoints(path)
+                        }
+                        editOverlayCache.add(line); view.overlays.add(line)
+                    }
+                    // Caminos NARANJAS (autos) editados.
+                    uiState.debugEditNavCar.forEach { path ->
+                        if (path.size < 2) return@forEach
+                        val line = Polyline().apply {
+                            outlinePaint.color = android.graphics.Color.argb(230, 255, 140, 0)
+                            outlinePaint.strokeWidth = 7f
+                            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+                            outlinePaint.isAntiAlias = true
+                            setPoints(path)
+                        }
+                        editOverlayCache.add(line); view.overlays.add(line)
+                    }
+                }
+                editOverlayCache.forEach { it.isEnabled = true }
+            } else {
+                editOverlayCache.forEach { it.isEnabled = false }
+                // Oculta las previsualizaciones del trazo en curso (línea y rectángulo).
+                (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 720 }) as? Polyline)?.isEnabled = false
+                (view.getTag(ovh.gabrielhuav.pow.R.id.route_overlay_tag.let { it + 730 }) as? org.osmdroid.views.overlay.Polygon)?.isEnabled = false
             }
 
             // ─── NEBLINA ANCLADA AL JUGADOR ─────────────────────────────────────
