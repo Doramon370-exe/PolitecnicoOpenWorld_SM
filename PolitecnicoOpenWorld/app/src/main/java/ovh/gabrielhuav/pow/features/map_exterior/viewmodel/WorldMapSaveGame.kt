@@ -7,10 +7,10 @@ import ovh.gabrielhuav.pow.data.repository.CampaignRepository
 import ovh.gabrielhuav.pow.data.repository.GameSaveData
 import ovh.gabrielhuav.pow.data.repository.SaveGameRepository
 import ovh.gabrielhuav.pow.data.repository.SavedNpc
-import ovh.gabrielhuav.pow.domain.models.CarModel
-import ovh.gabrielhuav.pow.domain.models.MissionCatalog
-import ovh.gabrielhuav.pow.domain.models.Npc
-import ovh.gabrielhuav.pow.domain.models.NpcType
+import ovh.gabrielhuav.pow.domain.models.map.CarModel
+import ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog
+import ovh.gabrielhuav.pow.domain.models.map.Npc
+import ovh.gabrielhuav.pow.domain.models.map.NpcType
 import ovh.gabrielhuav.pow.features.map_exterior.ui.components.PlayerSkin
 
 // ─── GUARDADO / CARGA DE LA PARTIDA (MODO HISTORIA, CON SLOTS) ────────────────
@@ -57,6 +57,8 @@ fun WorldMapViewModel.buildSaveData(schoolId: String, saveType: String = "MANUAL
         objectiveId = s.currentObjective?.id,
         objectiveDone = s.objectiveDone,
         interiorRoomId = currentInteriorRoomId,   // null si está en el mapa global
+        inventoryKeys = currentInteriorInventory,
+        lab1KeyFound = currentInteriorLab1KeyFound,
         saveType = saveType,
         savedAt = System.currentTimeMillis()
     )
@@ -86,6 +88,10 @@ fun WorldMapViewModel.restoreSaveData(data: GameSaveData) {
     // Recordamos el interior guardado (null = mapa global). MainActivity decide la ruta de
     // reentrada (un interior o el mapa global) a partir de este valor tras loadGame.
     currentInteriorRoomId = data.interiorRoomId
+    // Restaura inventario y progreso del puzzle de ENCB_lab1 (MainActivity los pasa al reabrir
+    // el interior para sembrar el estado del ZombieInteriorViewModel).
+    currentInteriorInventory = data.inventoryKeys
+    currentInteriorLab1KeyFound = data.lab1KeyFound
     _uiState.update {
         it.copy(
             wantedLevel = data.wantedLevel,
@@ -150,7 +156,7 @@ fun WorldMapViewModel.retryCampaignMission(context: Context) {
 
 // ─── OBJETIVOS DE CAMPAÑA ─────────────────────────────────────────────────────
 // Fija el objetivo activo (lo llama MainActivity al COMENZAR una campaña nueva).
-fun WorldMapViewModel.setCampaignObjective(objective: ovh.gabrielhuav.pow.domain.models.CampaignObjective?) {
+fun WorldMapViewModel.setCampaignObjective(objective: ovh.gabrielhuav.pow.domain.models.campaign.CampaignObjective?) {
     // Al cambiar de objetivo (nueva misión, MUNDO LIBRE, etc.) se limpia un posible "MISIÓN FALLIDA".
     _uiState.update { it.copy(currentObjective = objective, objectiveDone = false, showMissionFailed = false) }
 }

@@ -39,7 +39,7 @@ import kotlin.math.hypot
 import kotlin.math.sin
 import kotlin.random.Random
 
-internal fun ZombieGameViewModel.tick() {
+internal fun ZombieInteriorViewModel.tick() {
         val s = _state.value
         val now = System.currentTimeMillis()
 
@@ -69,7 +69,7 @@ internal fun ZombieGameViewModel.tick() {
         if (isMultiplayer) tickOnline(s, now) else tickOffline(s, now)
     }
 
-internal fun ZombieGameViewModel.tickOffline(s: ZombieGameState, now: Long) {
+internal fun ZombieInteriorViewModel.tickOffline(s: ZombieGameState, now: Long) {
         val room = ZombieRoomCatalog.rooms[s.currentRoomIndex]
 
         val stillActive = if (s.activeEffects.isEmpty()) s.activeEffects
@@ -134,6 +134,10 @@ internal fun ZombieGameViewModel.tickOffline(s: ZombieGameState, now: Long) {
         val nearItem = s.items.firstOrNull {
             !it.collected && hypot(it.x - s.playerX, it.y - s.playerY) <= ITEM_PICKUP_DIST
         }
+        // PUZZLE de llaves (ENCB_lab1): ¿el jugador está SOBRE una llave?
+        val nearKey = s.keys.firstOrNull {
+            hypot(it.x - s.playerX, it.y - s.playerY) <= ITEM_PICKUP_DIST
+        }
 
         _state.update {
             it.copy(
@@ -143,6 +147,7 @@ internal fun ZombieGameViewModel.tickOffline(s: ZombieGameState, now: Long) {
                 damagePulseTrigger = pulse,
                 zombiesRemaining = workingZombies.count { z -> !z.isDying },
                 nearbyItemId = nearItem?.id,
+                nearbyKeyId = nearKey?.id,
                 activeEffects = if (effectsChanged) stillActive else it.activeEffects
             )
         }
@@ -155,7 +160,7 @@ internal fun ZombieGameViewModel.tickOffline(s: ZombieGameState, now: Long) {
         }
     }
 
-internal fun ZombieGameViewModel.tickOnline(s: ZombieGameState, now: Long) {
+internal fun ZombieInteriorViewModel.tickOnline(s: ZombieGameState, now: Long) {
         val room = ZombieRoomCatalog.rooms[s.currentRoomIndex]
 
         val stillActive = if (s.activeEffects.isEmpty()) s.activeEffects
@@ -226,7 +231,7 @@ internal fun ZombieGameViewModel.tickOnline(s: ZombieGameState, now: Long) {
         }
     }
 
-internal fun ZombieGameViewModel.moveZombie(
+internal fun ZombieInteriorViewModel.moveZombie(
         z: ZombieEntity, px: Float, py: Float, now: Long,
         room: ZombieRoom, speedFactor: Float
     ): ZombieEntity {
@@ -268,7 +273,7 @@ internal fun ZombieGameViewModel.moveZombie(
         )
     }
 
-internal fun ZombieGameViewModel.knockbackZombie(
+internal fun ZombieInteriorViewModel.knockbackZombie(
         zx: Float, zy: Float, fromX: Float, fromY: Float, room: ZombieRoom, dist: Float
     ): Pair<Float, Float> {
         val dx = zx - fromX; val dy = zy - fromY

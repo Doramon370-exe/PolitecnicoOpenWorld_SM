@@ -72,7 +72,24 @@ import ovh.gabrielhuav.pow.features.interiores.core.ui.PlayerView          // vi
 import ovh.gabrielhuav.pow.features.interiores.core.ui.RemotePlayerView    // vista de jugador remoto/civil (core)
 import ovh.gabrielhuav.pow.features.interiores.core.viewmodel.CameraTransform
 import ovh.gabrielhuav.pow.features.interiores.core.viewmodel.DesignerTarget
-import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.ZombieGameViewModel
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.ZombieInteriorViewModel
+// REFACTOR: funciones del Modo Diseñador extraídas a ZombieGameDesigner.kt (parcial del VM)
+// → ahora son extensiones y requieren import explícito desde el paquete ui. Ver 09 §0.
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.toggleDesignerMode
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.setDesignerTarget
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.setDesignerBrushWall
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.selectDoorAtWorld
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.moveSelectedDoorToWorld
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.saveDesignerWaypoints
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.resetDesignerWaypoints
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.paintCellAtWorld
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.resizeDesignerMatrixBy
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.saveDesignerMatrix
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.resetDesignerMatrix
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.exportMatricesToUri
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.importMatricesFromUri
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.exportWaypointsToUri
+import ovh.gabrielhuav.pow.features.interiores.zombies.viewmodel.importWaypointsFromUri
 import ovh.gabrielhuav.pow.R
 import ovh.gabrielhuav.pow.features.map_exterior.ui.ZombiVideoPlayer
 import kotlin.math.max
@@ -113,18 +130,33 @@ fun ZombieGameScreen(
     onPlayStoryOutro: () -> Unit = {},
     // MODO HISTORIA: notifica la sala actual (id de ZombieRoomCatalog) al entrar y en cada
     // cambio de sala, para que el guardado sepa en qué interior estaba el jugador.
-    onRoomChanged: (String) -> Unit = {}
+    onRoomChanged: (String) -> Unit = {},
+    // MODO HISTORIA: objetivo a mostrar DENTRO del interior (p. ej. "Busca pistas en la ESCOM"
+    // tras la Misión 1). null = no mostrar widget de objetivo. El objetivo del mapa exterior NO
+    // se altera (allá sigue "Ingresa a la ESCOM, Cumplido").
+    interiorObjective: ovh.gabrielhuav.pow.domain.models.campaign.CampaignObjective? = null,
+    // INVENTARIO: estado restaurado al CARGAR partida dentro del interior (assetPaths de llaves +
+    // progreso de ENCB_lab1) y callback para PERSISTIRLO (lo escribe MainActivity en el VM del mundo).
+    initialInventoryKeys: List<String> = emptyList(),
+    initialLab1KeyFound: Boolean = false,
+    onInteriorProgress: (List<String>, Boolean) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     // Modo Desarrollador: si está APAGADO se ocultan botones de prueba (Diseñador, y "Salir al mapa"
     // durante la Misión 1). Se lee una vez al entrar a la pantalla.
     val developerMode = remember { ovh.gabrielhuav.pow.data.repository.SettingsRepository(context).getDeveloperMode() }
     val serverUrl = if (isMultiplayer) ovh.gabrielhuav.pow.BuildConfig.INTERIORS_SERVER_URL else null
-    val viewModel: ZombieGameViewModel = viewModel(
-        factory = ZombieGameViewModel.Factory(context, serverUrl, playerName, startRoomId)
+    val viewModel: ZombieInteriorViewModel = viewModel(
+        factory = ZombieInteriorViewModel.Factory(context, serverUrl, playerName, startRoomId, initialInventoryKeys, initialLab1KeyFound)
     )
     val state by viewModel.state.collectAsState()
     val density = LocalDensity.current
+
+    // Puente de PERSISTENCIA: cada cambio de inventario/progreso del puzzle se empuja al VM del
+    // mundo (vía MainActivity) para que el guardado lo capture.
+    LaunchedEffect(state.inventoryKeys, state.lab1KeyFound) {
+        onInteriorProgress(state.inventoryKeys, state.lab1KeyFound)
+    }
 
     // Export/Import del JSON de matrices (igual que el mapa principal con landmarks).
     val exportLauncher = rememberLauncherForActivityResult(
@@ -162,7 +194,7 @@ fun ZombieGameScreen(
     LaunchedEffect(state.currentRoomIndex) { onRoomChanged(room.id) }
     val effectiveBgAsset = when {
         room.id == ZombieRoomCatalog.LOBBY_ID && state.zombieModeActivated ->
-            "ZOMBIES_MOD/BUILDINGS_Z/building_escom_zombie.webp"
+            "BUILDINGS/building_escom_zombie.webp"
         room.type == ZoneType.BUILDING && !state.zombieModeActivated ->
             "INTERIORS/ESCOM/z_${room.id.removePrefix("za_")}.webp"
         else -> room.backgroundAsset
@@ -341,6 +373,19 @@ fun ZombieGameScreen(
                     )
                 }
 
+                // Llaves del puzzle (Modo Historia · ENCB_lab1) en el suelo.
+                state.keys.forEach { key ->
+                    if (!onScreen(key.x, key.y)) return@forEach
+                    KeyGroundItem(
+                        assetPath = key.assetPath,
+                        highlighted = state.nearbyKeyId == key.id,
+                        modifier = Modifier.absoluteOffset(
+                            x = with(density) { toScreenX(key.x).toDp() } - 22.dp,
+                            y = with(density) { toScreenY(key.y).toDp() } - 22.dp
+                        )
+                    )
+                }
+
                 // Proyectiles
                 val bulletSize = 10f * cam.scale
                 state.projectiles.forEach { p ->
@@ -452,7 +497,8 @@ fun ZombieGameScreen(
                 )
             }
             // ─── Mano zombi fija en el lobby (desaparece tras activar el modo zombie) ──
-            if (room.id == ZombieRoomCatalog.LOBBY_ID && !state.zombieModeActivated) {
+            // Solo visible en Modo Desarrollador (Interfaz): es la que activa el modo zombi.
+            if (developerMode && room.id == ZombieRoomCatalog.LOBBY_ID && !state.zombieModeActivated) {
                 val handNx = 0.50f
                 val handNy = 0.45f
                 val handSizePx = 64f * cam.scale
@@ -464,7 +510,7 @@ fun ZombieGameScreen(
                 LaunchedEffect(Unit) {
                     handBitmap = withContext(Dispatchers.IO) {
                         try {
-                            context.assets.open("ZOMBIES_MOD/zombie_hand.webp")
+                            context.assets.open("SPRITES/ZOMBIE/zombie_hand.webp")
                                 .use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
                         } catch (e: Exception) { null }
                     }
@@ -551,10 +597,14 @@ fun ZombieGameScreen(
                 onSecondaryPressed = viewModel::onSecondaryPressed,
                 onSecondaryReleased = viewModel::onSecondaryReleased,
                 onSelectMode = viewModel::selectCombatMode,
-                onDismissWeaponMenu = viewModel::dismissWeaponMenu
+                onDismissInventory = viewModel::dismissInventory
             )
 
-            (state.nearbyDoorLabel ?: state.pickupToast ?: state.effectToast)?.let { prompt ->
+            // Aviso de llave (cuando el jugador está sobre una). keyMessage (resultado de probar /
+            // puerta cerrada) tiene prioridad y es transitorio.
+            val keyPrompt = if (state.nearbyKeyId != null)
+                stringResource(R.string.zgame_key_prompt) else null
+            (state.keyMessage ?: state.nearbyDoorLabel ?: keyPrompt ?: state.pickupToast ?: state.effectToast)?.let { prompt ->
                 Box(Modifier.fillMaxSize().padding(top = 110.dp), Alignment.TopCenter) {
                     Text(prompt.uppercase(), color = Color.White, fontWeight = FontWeight.Black, fontSize = 15.sp,
                         modifier = Modifier.background(Color(0xFF3B0D1B).copy(alpha = 0.85f), RoundedCornerShape(8.dp))
@@ -571,7 +621,7 @@ fun ZombieGameScreen(
                     Alignment.TopCenter
                 ) {
                     Text(
-                        "Objetivo: Investiga qué pasó",
+                        stringResource(R.string.zgame_objective_investigate),
                         color = Color.White,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
@@ -580,6 +630,22 @@ fun ZombieGameScreen(
                             .alpha(0.85f)   // difuminado para no chocar con los widgets
                             .background(Color(0x99000000), RoundedCornerShape(10.dp))
                             .padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+            }
+
+            // ─── OBJETIVO DE CAMPAÑA EN INTERIORES (p. ej. ESCOM tras Misión 1) ──
+            // Mismo widget que el mapa exterior, anclado arriba-centro. Sin distancia
+            // (playerLocation=null) → muestra la descripción del objetivo.
+            interiorObjective?.let { obj ->
+                Box(
+                    Modifier.fillMaxSize().systemBarsPadding().padding(top = 12.dp),
+                    Alignment.TopCenter
+                ) {
+                    ovh.gabrielhuav.pow.features.map_exterior.ui.components.ObjectivesWidget(
+                        objective = obj,
+                        done = false,
+                        playerLocation = null
                     )
                 }
             }
@@ -706,13 +772,14 @@ fun ZombieGameScreen(
                         val sChar = stringResource(R.string.wm_choose_character)
                         val sDesigner = stringResource(R.string.zgame_opt_designer)
                         val sExitMap = stringResource(R.string.zgame_opt_exit_map)
+                        val sSaveGame = stringResource(R.string.wm_opt_save_game)
                         buildList {
                             // "Elegir personaje" (selector de skin), movido aquí desde el botón suelto.
                             add(OptionMenuItem(sChar, Icons.Default.Person, Color(0xFFD91B5B)) { viewModel.toggleSkinSelector(true) })
                             // "Diseñador": solo en Modo Desarrollador.
                             if (developerMode) add(OptionMenuItem(sDesigner, Icons.Default.Architecture) { viewModel.toggleDesignerMode() })
                             // MODO HISTORIA: guardar partida también desde interiores (selector de slots).
-                            add(OptionMenuItem("Guardar partida", Icons.Default.Save) { onRequestSaveGame() })
+                            add(OptionMenuItem(sSaveGame, Icons.Default.Save) { onRequestSaveGame() })
                             // "Salir al mapa": en Misión 1 se oculta salvo en Modo Desarrollador.
                             if (developerMode || !inMission1) add(OptionMenuItem(sExitMap, Icons.Default.ExitToApp) { viewModel.exitToWorld() })
                         }
@@ -830,7 +897,7 @@ private fun DesignerToolbar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "⠿ Mover (toca = recentrar)",
+                androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_move_handle),
                 color = Color(0xFFFFD54F), fontSize = 10.sp, fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center, maxLines = 1,
                 modifier = Modifier
@@ -861,14 +928,14 @@ private fun DesignerToolbar(
         )
         // Selector de objetivo: MATRIZ de colisión o WAYPOINTS (puertas).
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            ToolButton("MATRIZ", !isWaypoints, Color(0xFF3A86FF), Modifier.weight(1f)) { onSelectTarget(DesignerTarget.MATRIX) }
-            ToolButton("WAYPOINTS", isWaypoints, Color(0xFFD4AF37), Modifier.weight(1f)) { onSelectTarget(DesignerTarget.WAYPOINTS) }
+            ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_matrix), !isWaypoints, Color(0xFF3A86FF), Modifier.weight(1f)) { onSelectTarget(DesignerTarget.MATRIX) }
+            ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_waypoints), isWaypoints, Color(0xFFD4AF37), Modifier.weight(1f)) { onSelectTarget(DesignerTarget.WAYPOINTS) }
         }
         Text(
             if (isWaypoints)
                 (if (hasSelectedDoor) androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_drag_door)
                  else androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_touch_door))
-            else "Toca o arrastra sobre la rejilla. Rojo = pared.",
+            else androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_grid_paint),
             color = Color.White.copy(alpha = 0.7f), fontSize = 10.sp
         )
         // ─── PINCEL + TAMAÑO DE LA MATRIZ (TODO dentro del MISMO scroll) ──────────────
@@ -876,18 +943,18 @@ private fun DesignerToolbar(
         // scrollea JUNTA; solo el asa "⠿ Mover" de arriba queda fija para poder arrastrar siempre.
         if (!isWaypoints) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                ToolButton("PARED", brushWall, Color(0xFFD32F2F), Modifier.weight(1f)) { onBrush(true) }
-                ToolButton("BORRAR", !brushWall, Color(0xFF4CAF50), Modifier.weight(1f)) { onBrush(false) }
+                ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_wall), brushWall, Color(0xFFD32F2F), Modifier.weight(1f)) { onBrush(true) }
+                ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_erase), !brushWall, Color(0xFF4CAF50), Modifier.weight(1f)) { onBrush(false) }
             }
             Text(
                 androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_size_grid, gridCols, gridRows),
                 color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, fontWeight = FontWeight.Bold
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                ToolButton("COL −", false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(-1, 0) }
-                ToolButton("COL +", false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(1, 0) }
-                ToolButton("FIL −", false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(0, -1) }
-                ToolButton("FIL +", false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(0, 1) }
+                ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_col_minus), false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(-1, 0) }
+                ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_col_plus), false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(1, 0) }
+                ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_row_minus), false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(0, -1) }
+                ToolButton(androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_row_plus), false, Color(0xFF3A86FF), Modifier.weight(1f)) { onResize(0, 1) }
             }
         }
         // ─── ACCIONES (Guardar/Reset · Exportar/Importar/Salir), dentro del mismo scroll ──
@@ -897,7 +964,7 @@ private fun DesignerToolbar(
                 modifier = Modifier.weight(1f).height(40.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
                 shape = RoundedCornerShape(8.dp)
-            ) { Text(if (dirty) androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_save_unsaved) else "GUARDAR", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+            ) { Text(if (dirty) androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_save_unsaved) else androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.int_save), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
             Button(
                 onClick = onReset,
                 modifier = Modifier.weight(1f).height(40.dp),
@@ -935,6 +1002,39 @@ private fun ToolButton(label: String, selected: Boolean, color: Color, modifier:
         shape = RoundedCornerShape(8.dp)
     ) {
         Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+// Llave del puzzle (ENCB_lab1) dibujada en el suelo. Carga el PNG del asset (submuestreado para
+// no gastar memoria en gama baja) y, si el jugador está sobre ella, la resalta con un aro dorado.
+@Composable
+private fun KeyGroundItem(assetPath: String, highlighted: Boolean, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var bmp by remember(assetPath) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(assetPath) {
+        bmp = withContext(Dispatchers.IO) {
+            try {
+                context.assets.open(assetPath).use {
+                    val o = android.graphics.BitmapFactory.Options().apply { inSampleSize = 4 }
+                    android.graphics.BitmapFactory.decodeStream(it, null, o)?.asImageBitmap()
+                }
+            } catch (e: Exception) { null }
+        }
+    }
+    Box(modifier = modifier.size(44.dp), contentAlignment = Alignment.Center) {
+        if (highlighted) {
+            Box(
+                Modifier.size(44.dp).clip(CircleShape)
+                    .background(Color(0x66FFD54F))
+                    .border(2.dp, Color(0xFFFFD54F), CircleShape)
+            )
+        }
+        val img = bmp
+        if (img != null) {
+            Image(img, contentDescription = androidx.compose.ui.res.stringResource(ovh.gabrielhuav.pow.R.string.cd_key), modifier = Modifier.size(if (highlighted) 40.dp else 34.dp))
+        } else {
+            Text("🔑", fontSize = 26.sp)
+        }
     }
 }
 

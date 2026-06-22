@@ -53,13 +53,24 @@ import ovh.gabrielhuav.pow.features.interiores.escom.ui.DeportivoFutbolScreen
 import ovh.gabrielhuav.pow.features.main_menu.ui.CollectiblesScreen
 import ovh.gabrielhuav.pow.features.main_menu.ui.MainMenuScreen
 import ovh.gabrielhuav.pow.features.interiores.escom.ui.FesInteriorScreen
-import ovh.gabrielhuav.pow.features.main_menu.ui.StoryModeScreen
-import ovh.gabrielhuav.pow.features.main_menu.ui.StoryIntroScreen
-import ovh.gabrielhuav.pow.domain.models.SchoolCatalog
+import ovh.gabrielhuav.pow.features.campaign.ui.StoryModeScreen
+import ovh.gabrielhuav.pow.features.campaign.ui.StoryIntroScreen
+import ovh.gabrielhuav.pow.domain.models.campaign.SchoolCatalog
 import ovh.gabrielhuav.pow.data.repository.CampaignRepository
 import ovh.gabrielhuav.pow.features.main_menu.viewmodel.CollectiblesViewModel
 import ovh.gabrielhuav.pow.features.map_exterior.ui.WorldMapScreen
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.WorldMapViewModel
+// REFACTOR: toggles de widgets extraídos a WorldMapCameraUi.kt (extensiones) → import explícito.
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.toggleCacheWidget
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.toggleFpsWidget
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.toggleZoomWidget
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.toggleSpeedometer
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.toggleCoordsWidget
+// REFACTOR: ajustes/skin extraídos a WorldMapSettings.kt (extensiones) → import explícito.
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setNpcDensity
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setNpcEmojiLod
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setNpcFullEmoji
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.selectSkin
 // REFACTOR: extensiones del VM (WorldMapProviders.kt) → requieren import explícito.
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.requestMapProvider
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setMapProvider
@@ -71,6 +82,13 @@ import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.retryCampaignMission
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setCampaignObjective
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.consumePendingMission2Intro
 import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.startMission2
+// REFACTOR: extensiones del VM extraídas (campaña/teleport/shinecto) → import explícito.
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.setStorySpawn
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.teleportToMetroStation
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.teleportToMetrobusStation
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.onShineCTODiscoveryConfirmed
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.consumeNavigateToShineCTO
+import ovh.gabrielhuav.pow.features.map_exterior.viewmodel.consumeEscomDoorNavigation
 import ovh.gabrielhuav.pow.data.repository.SaveGameRepository
 import ovh.gabrielhuav.pow.features.settings.ui.SettingsScreen
 import ovh.gabrielhuav.pow.features.settings.viewmodel.SettingsViewModel
@@ -248,13 +266,13 @@ class MainActivity : ComponentActivity() {
                     var showSaveDialog by remember { mutableStateOf(false) }
                     if (showSaveDialog) {
                         ovh.gabrielhuav.pow.features.main_menu.ui.SaveSlotsDialog(
-                            title = "Guardar partida",
+                            title = stringResource(R.string.wm_opt_save_game),
                             summariesProvider = { SaveGameRepository(this@MainActivity).summaries() },
                             mode = ovh.gabrielhuav.pow.features.main_menu.ui.SaveSlotsMode.SAVE,
                             onPick = { slot ->
                                 showSaveDialog = false
                                 worldMapViewModel.saveGame(this@MainActivity, slot)
-                                android.widget.Toast.makeText(this@MainActivity, "Partida guardada (slot $slot)", android.widget.Toast.LENGTH_SHORT).show()
+                                android.widget.Toast.makeText(this@MainActivity, this@MainActivity.getString(R.string.save_toast_saved, slot), android.widget.Toast.LENGTH_SHORT).show()
                             },
                             onDelete = { slot -> SaveGameRepository(this@MainActivity).clear(slot) },
                             onDismiss = { showSaveDialog = false }
@@ -322,15 +340,34 @@ class MainActivity : ComponentActivity() {
                             var showLoadDialog by remember { mutableStateOf(false) }
                             // COMENZAR: antes de la intro se elige el SLOT MANUAL donde quedará la
                             // partida nueva (los 2 slots de auto-guardado salen deshabilitados).
-                            var newGameSchool by remember { mutableStateOf<ovh.gabrielhuav.pow.domain.models.CampaignSchool?>(null) }
+                            var newGameSchool by remember { mutableStateOf<ovh.gabrielhuav.pow.domain.models.campaign.CampaignSchool?>(null) }
+                            // PARTIDA NUEVA: PRIMERO se elige el PERSONAJE; al elegir se fija la skin
+                            // y se continúa al selector de slot (newGameSchool).
+                            var charPickSchool by remember { mutableStateOf<ovh.gabrielhuav.pow.domain.models.campaign.CampaignSchool?>(null) }
                             StoryModeScreen(
-                                onStartCampaign = { school -> newGameSchool = school },
+                                onStartCampaign = { school -> charPickSchool = school },
                                 onLoadCampaign = { showLoadDialog = true },
                                 onBack = { navController.popBackStack() }
                             )
+                            // Selector de personaje (Hombre/Mujer/No binario; LÁZARO solo en Modo Dev).
+                            charPickSchool?.let { school ->
+                                val devModeChar = remember {
+                                    ovh.gabrielhuav.pow.data.repository.SettingsRepository(this@MainActivity).getDeveloperMode()
+                                }
+                                ovh.gabrielhuav.pow.features.main_menu.ui.NewGameCharacterDialog(
+                                    context = this@MainActivity,
+                                    includeLazaro = devModeChar,
+                                    onPick = { skin ->
+                                        worldMapViewModel.selectSkin(skin)
+                                        charPickSchool = null
+                                        newGameSchool = school   // continúa al selector de slot
+                                    },
+                                    onDismiss = { charPickSchool = null }
+                                )
+                            }
                             newGameSchool?.let { school ->
                                 ovh.gabrielhuav.pow.features.main_menu.ui.SaveSlotsDialog(
-                                    title = "Nueva partida · elige slot",
+                                    title = stringResource(R.string.save_dialog_new_slot),
                                     summariesProvider = { SaveGameRepository(this@MainActivity).summaries() },
                                     mode = ovh.gabrielhuav.pow.features.main_menu.ui.SaveSlotsMode.SAVE,
                                     onDelete = { slot -> SaveGameRepository(this@MainActivity).clear(slot) },
@@ -338,12 +375,15 @@ class MainActivity : ComponentActivity() {
                                         newGameSchool = null
                                         navController.navigate("story_intro/${school.id}?slot=$slot")
                                     },
-                                    onDismiss = { newGameSchool = null }
+                                    onDismiss = { newGameSchool = null },
+                                    // Nueva partida: oculta los 2 slots de autoguardado (no son
+                                    // seleccionables) para que el usuario no intente picarlos.
+                                    hideAutoSlots = true
                                 )
                             }
                             if (showLoadDialog) {
                                 ovh.gabrielhuav.pow.features.main_menu.ui.SaveSlotsDialog(
-                                    title = "Cargar partida",
+                                    title = stringResource(R.string.save_dialog_load),
                                     summariesProvider = { SaveGameRepository(this@MainActivity).summaries() },
                                     mode = ovh.gabrielhuav.pow.features.main_menu.ui.SaveSlotsMode.LOAD,
                                     onDelete = { slot -> SaveGameRepository(this@MainActivity).clear(slot) },
@@ -409,7 +449,10 @@ class MainActivity : ComponentActivity() {
                                         ovh.gabrielhuav.pow.domain.models.zombie.ZombieRoomCatalog.ENCB_LOBBY_ID
                                     worldMapViewModel.disconnectFromMultiplayer()
                                     worldMapViewModel.setStorySpawn(school.latitude, school.longitude)
-                                    worldMapViewModel.setCampaignObjective(ovh.gabrielhuav.pow.domain.models.MissionCatalog.first)
+                                    worldMapViewModel.setCampaignObjective(ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.first)
+                                    // Partida NUEVA: inventario fresco (el VM es Activity-scoped y persiste).
+                                    worldMapViewModel.currentInteriorInventory = emptyList()
+                                    worldMapViewModel.currentInteriorLab1KeyFound = false
                                     // Guardado MANUAL inicial en el slot elegido (para que "CARGAR PARTIDA"
                                     // lo muestre desde ya). Los autoguardados posteriores van a los slots auto.
                                     if (chosenSlot in SaveGameRepository.MANUAL_SLOTS) {
@@ -464,6 +507,13 @@ class MainActivity : ComponentActivity() {
                                     navController.navigate("story_outro") {
                                         popUpTo("encb_lobby") { inclusive = true }
                                     }
+                                },
+                                // INVENTARIO: restaura el progreso guardado y persiste cada cambio en el VM del mundo.
+                                initialInventoryKeys = worldMapViewModel.currentInteriorInventory,
+                                initialLab1KeyFound = worldMapViewModel.currentInteriorLab1KeyFound,
+                                onInteriorProgress = { keys, found ->
+                                    worldMapViewModel.currentInteriorInventory = keys
+                                    worldMapViewModel.currentInteriorLab1KeyFound = found
                                 }
                             )
                         }
@@ -477,13 +527,13 @@ class MainActivity : ComponentActivity() {
                         composable(route = "story_outro") {
                             StoryIntroScreen(
                                 school = SchoolCatalog.default,
-                                sequenceId = ovh.gabrielhuav.pow.domain.models.StoryComicCatalog.ENCB_OUTRO_ID,
+                                sequenceId = ovh.gabrielhuav.pow.domain.models.campaign.StoryComicCatalog.ENCB_OUTRO_ID,
                                 onBegin = {
                                     // SPAWN EXCLUSIVO DEL MODO HISTORIA: al terminar el outro
                                     // (IntroPOW11), el jugador entra al mapa global en el punto de
                                     // arranque de la Misión 1 (checkpoint de la escolta).
                                     // setStorySpawn fija la posición y activa inCampaign=true.
-                                    worldMapViewModel.setStorySpawn(ovh.gabrielhuav.pow.domain.models.MissionCatalog.MISSION1_SPAWN_LAT, ovh.gabrielhuav.pow.domain.models.MissionCatalog.MISSION1_SPAWN_LON)
+                                    worldMapViewModel.setStorySpawn(ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.MISSION1_SPAWN_LAT, ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.MISSION1_SPAWN_LON)
                                     worldMapViewModel.currentInteriorRoomId = null
                                     // Inicia la música de dirigirse al lugar seguro
                                     ovh.gabrielhuav.pow.features.audio.SoundManager.getInstance(this@MainActivity).playLugarSeguroMusic()
@@ -493,7 +543,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onBack = {
                                     // Misma transición narrativa (saltar/volver el outro): mismo checkpoint.
-                                    worldMapViewModel.setStorySpawn(ovh.gabrielhuav.pow.domain.models.MissionCatalog.MISSION1_SPAWN_LAT, ovh.gabrielhuav.pow.domain.models.MissionCatalog.MISSION1_SPAWN_LON)
+                                    worldMapViewModel.setStorySpawn(ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.MISSION1_SPAWN_LAT, ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.MISSION1_SPAWN_LON)
                                     worldMapViewModel.currentInteriorRoomId = null
                                     ovh.gabrielhuav.pow.features.audio.SoundManager.getInstance(this@MainActivity).playLugarSeguroMusic()
                                     navController.navigate("world_map") {
@@ -511,7 +561,7 @@ class MainActivity : ComponentActivity() {
                         composable(route = "story_mission2") {
                             StoryIntroScreen(
                                 school = SchoolCatalog.default,
-                                sequenceId = ovh.gabrielhuav.pow.domain.models.StoryComicCatalog.MISSION2_INTRO_ID,
+                                sequenceId = ovh.gabrielhuav.pow.domain.models.campaign.StoryComicCatalog.MISSION2_INTRO_ID,
                                 onBegin = {
                                     worldMapViewModel.startMission2()
                                     navController.popBackStack("world_map", inclusive = false)
@@ -580,6 +630,15 @@ class MainActivity : ComponentActivity() {
                                 onNpcFullEmojiToggled = {
                                     settingsViewModel.toggleNpcFullEmoji(it)
                                     worldMapViewModel.setNpcFullEmoji(it)
+                                },
+                                // Preset "Optimizar para mi dispositivo": aplica de un toque los 3 ajustes
+                                // de gama baja (persisten en Ajustes Y se aplican en vivo al mapa).
+                                onOptimizeForDevice = {
+                                    val minD = ovh.gabrielhuav.pow.data.repository.SettingsRepository.NPC_DENSITY_MIN
+                                    settingsViewModel.changeNpcDensity(minD); worldMapViewModel.setNpcDensity(minD)
+                                    settingsViewModel.toggleNpcEmojiLod(true); worldMapViewModel.setNpcEmojiLod(true)
+                                    settingsViewModel.toggleNpcFullEmoji(true); worldMapViewModel.setNpcFullEmoji(true)
+                                    android.widget.Toast.makeText(this@MainActivity, getString(R.string.settings_optimize_applied), android.widget.Toast.LENGTH_SHORT).show()
                                 },
                                 onNavigateBack = {
                                     // Descartar cambios de controles no guardados al salir.
@@ -909,6 +968,15 @@ class MainActivity : ComponentActivity() {
                             val wmState by worldMapViewModel.uiState.collectAsState()
                             val startRoom = backStackEntry.arguments?.getString("startRoom")
                                 ?: ovh.gabrielhuav.pow.domain.models.zombie.ZombieRoomCatalog.LOBBY_ID
+                            // MODO HISTORIA: tras la Misión 1 (INGRESAR_ESCOM cumplida), al entrar al
+                            // interior de la ESCOM (lobby) se muestra el objetivo "Busca pistas en la ESCOM".
+                            // El objetivo exterior NO cambia (allá sigue "Ingresa a la ESCOM, Cumplido").
+                            val interiorObjective = if (
+                                worldMapViewModel.inCampaign &&
+                                startRoom == ovh.gabrielhuav.pow.domain.models.zombie.ZombieRoomCatalog.LOBBY_ID &&
+                                wmState.currentObjective?.id == ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.INGRESAR_ESCOM.id &&
+                                wmState.objectiveDone
+                            ) ovh.gabrielhuav.pow.domain.models.campaign.MissionCatalog.BUSCAR_PISTAS_ESCOM else null
                             ZombieGameScreen(
                                 onExitToWorld = {
                                     worldMapViewModel.currentInteriorRoomId = null
@@ -934,6 +1002,14 @@ class MainActivity : ComponentActivity() {
                                         // Limpia el interior y el world_map base (el outro reentra al mundo).
                                         popUpTo("world_map") { inclusive = true }
                                     }
+                                },
+                                interiorObjective = interiorObjective,
+                                // INVENTARIO: restaura el progreso guardado y persiste cada cambio en el VM del mundo.
+                                initialInventoryKeys = worldMapViewModel.currentInteriorInventory,
+                                initialLab1KeyFound = worldMapViewModel.currentInteriorLab1KeyFound,
+                                onInteriorProgress = { keys, found ->
+                                    worldMapViewModel.currentInteriorInventory = keys
+                                    worldMapViewModel.currentInteriorLab1KeyFound = found
                                 }
                             )
                         }
